@@ -24,7 +24,6 @@ from ryu.base import app_manager
 from ryu.controller import mac_to_port
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER
-from ryu.controller.handler import DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_0
 from ryu.lib.mac import haddr_to_bin
@@ -32,31 +31,31 @@ from ryu.lib.mac import haddr_to_str
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import arp, ipv4
+import time
 
 
 
 class SimpleSwitch(app_manager.RyuApp):
-    OFP_VERSIONS = [ofproto_v1_0.OFP_VERSION]
-    hostCounter = 0
-    def __init__(self, *args, **kwargs):
+	OFP_VERSIONS = [ofproto_v1_0.OFP_VERSION]
+	hostCounter = 0
+	def __init__(self, *args, **kwargs):
 		super(SimpleSwitch, self).__init__(*args, **kwargs)
 		self.mac_to_port = {}
+		
+	def add_flow(self, datapath, in_port, dst, actions):
+		ofproto = datapath.ofproto
+		match = datapath.ofproto_parser.OFPMatch(
+			in_port=in_port, dl_dst=haddr_to_bin(dst))
 
-    def add_flow(self, datapath, in_port, dst, actions):
-        ofproto = datapath.ofproto
+		mod = datapath.ofproto_parser.OFPFlowMod(
+			datapath=datapath, match=match, cookie=0,
+			command=ofproto.OFPFC_ADD, idle_timeout=0, hard_timeout=0,
+			priority=ofproto.OFP_DEFAULT_PRIORITY,
+			flags=ofproto.OFPFF_SEND_FLOW_REM, actions=actions)
+		datapath.send_msg(mod)
 
-        match = datapath.ofproto_parser.OFPMatch(
-            in_port=in_port, dl_dst=haddr_to_bin(dst))
-
-        mod = datapath.ofproto_parser.OFPFlowMod(
-            datapath=datapath, match=match, cookie=0,
-            command=ofproto.OFPFC_ADD, idle_timeout=0, hard_timeout=0,
-            priority=ofproto.OFP_DEFAULT_PRIORITY,
-            flags=ofproto.OFPFF_SEND_FLOW_REM, actions=actions)
-        datapath.send_msg(mod)
-
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def _packet_in_handler(self, ev):
+	@set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+	def _packet_in_handler(self, ev):
 		msg = ev.msg
 		datapath = msg.datapath
 		ofproto = datapath.ofproto
@@ -89,11 +88,10 @@ class SimpleSwitch(app_manager.RyuApp):
 		self.mac_to_port.setdefault(dpid, {})
 		
 				
-		if not((isIP) and ((src == "00:00:00:00:00:02" and dst == "00:00:00:00:00:03") or (src == "00:00:00:00:00:03" and dst == "00:00:00:00:00:02"))):
-			if(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"):
-				self.logger.info("Packet to or from Host 1 has been logged.")
+		if not((isIP) and ((src == "00:00:00:00:00:02" and dst == "00:00:00:00:00:03") or (src == "00:00:00:00:00:03" and dst == "00:00:00:00:00:02"))): #Checks that the packet exchange is not IP packets between hosts 2 and 3
+			if(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"): #Checks whether the packet originated from, or is going to host 1
 				self.hostCounter +=1
-				print(self.hostCounter)
+				self.logger.info("%s Packets have been sent to or from host 1", self.hostCounter)
 			
 			self.logger.info("Packet logic is now executing")
         # learn a mac address to avoid FLOOD next time.
@@ -107,7 +105,7 @@ class SimpleSwitch(app_manager.RyuApp):
 			actions = [datapath.ofproto_parser.OFPActionOutput(out_port)]
 	
 		# install a flow to avoid packet_in next time
-			if out_port != ofproto.OFPP_FLOOD:
+			if out_port != ofproto.OFPP_FLOOD and not(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"):
 				self.add_flow(datapath, msg.in_port, dst, actions)
 				
 			
@@ -117,33 +115,41 @@ class SimpleSwitch(app_manager.RyuApp):
 				actions=actions)
 			datapath.send_msg(out)
 		else:
-			self.logger.info("IP packet between hosts 2 and 3 was blocked")
+			self.logger.info("IP packet between hosts 2 and 3 was blocked") #Seperate case for when we dont want to send the packets
 			
 			
-    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
-    def _port_status_handler(self, ev):
-        msg = ev.msg
-        reason = msg.reason
-        port_no = msg.desc.port_no
+	@set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
+	def _port_status_handler(self, ev):
+		msg = ev.msg
+		reason = msg.reason
+		port_no = msg.desc.port_no
 
-        ofproto = msg.datapath.ofproto
-        if reason == ofproto.OFPPR_ADD:
-            self.logger.info("port added %s", port_no)
-        elif reason == ofproto.OFPPR_DELETE:
-            self.logger.info("port deleted %s", port_no)
-        elif reason == ofproto.OFPPR_MODIFY:
-            self.logger.info("port modified %s", port_no)
-        else:
-            self.logger.info("Illegal port state %s %s", port_no, reason)#Modified Spelling Mistakes
+		ofproto = msg.datapath.ofproto
+		if reason == ofproto.OFPPR_ADD:
+			self.logger.info("port added %s", port_no)
+		elif reason == ofproto.OFPPR_DELETE:
+			self.logger.info("port deleted %s", port_no)
+		elif reason == ofproto.OFPPR_MODIFY:
+			self.logger.info("port modified %s", port_no)
+		else:
+			self.logger.info("Illegal port state %s %s", port_no, reason)#Modified Spelling Mistakes
+
 			
+		
+			
+			
+			
+			
+		
+		
 	
 
-			
-			
+		
+		
 
-				
+		
 
-			
+		
 		
 		
 		
