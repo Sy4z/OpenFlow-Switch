@@ -25,23 +25,23 @@ from ryu.controller import mac_to_port
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER
 from ryu.controller.handler import set_ev_cls
-from ryu.ofproto import ofproto_v1_0
+from ryu.ofproto import ofproto_v1_0, ether
 from ryu.lib.mac import haddr_to_bin
 from ryu.lib.mac import haddr_to_str
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import arp, ipv4
-import time
+from ryu.lib.packet import lldp
+from ryu.topology.switches import LLDPPacket
 
 
 
 class SimpleSwitch(app_manager.RyuApp):
 	OFP_VERSIONS = [ofproto_v1_0.OFP_VERSION]
-	hostCounter = 0
+	hostCounter = 0 #Global variable for traffic counter on specified host
 	def __init__(self, *args, **kwargs):
 		super(SimpleSwitch, self).__init__(*args, **kwargs)
 		self.mac_to_port = {}
-		
 	def add_flow(self, datapath, in_port, dst, actions):
 		ofproto = datapath.ofproto
 		match = datapath.ofproto_parser.OFPMatch(
@@ -63,24 +63,24 @@ class SimpleSwitch(app_manager.RyuApp):
 		eth = pkt.get_protocol(ethernet.ethernet)
 		arp_packet = pkt.get_protocol(arp.arp)
 		ipv4_packet = pkt.get_protocol(ipv4.ipv4)
-		isIP = False
+		lldp_packet = pkt.get_protocol(lldp.lldp)
 		
-		
+		#block for debugging, prints packet type.
 		if arp_packet:
 			pack = arp_packet
 			self.logger.info("The packet is: %s", pack)
 		elif ipv4_packet:
 			pack = ipv4_packet
-			isIP = True
-			self.logger.info("The packet is: %s", pack)		
+			self.logger.info("The packet is: %s", pack)	
+		elif lldp_packet:
+			pack = lldp_packet
+			self.logger.info("The packet is: %s", pack)
 		else:
 			pack = eth
 			self.logger.info("The packet is: %s", pack)
+			
         
-        
-        
-        
-
+        #Setup source and destination addresses
 		dst = eth.dst
 		src = eth.src
 
@@ -88,34 +88,31 @@ class SimpleSwitch(app_manager.RyuApp):
 		self.mac_to_port.setdefault(dpid, {})
 		
 				
-		if not((isIP) and ((src == "00:00:00:00:00:02" and dst == "00:00:00:00:00:03") or (src == "00:00:00:00:00:03" and dst == "00:00:00:00:00:02"))): #Checks that the packet exchange is not IP packets between hosts 2 and 3
-			if(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"): #Checks whether the packet originated from, or is going to host 1
-				self.hostCounter +=1
-				self.logger.info("%s Packets have been sent to or from host 1", self.hostCounter)
-			
+		
+		if(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"): #Checks whether the packet originated from, or is going to host 1
+			self.hostCounter +=1
+			self.logger.info("%s Packets have been sent to or from host 1", self.hostCounter)			
 			self.logger.info("Packet logic is now executing")
         # learn a mac address to avoid FLOOD next time.
-			self.mac_to_port[dpid][src] = msg.in_port
-		
-			if dst in self.mac_to_port[dpid]:
-				out_port = self.mac_to_port[dpid][dst]
-			else:
-				out_port = ofproto.OFPP_FLOOD
+		self.mac_to_port[dpid][src] = msg.in_port
+		if dst in self.mac_to_port[dpid]:
+			out_port = self.mac_to_port[dpid][dst]
+		else:
+			out_port = ofproto.OFPP_FLOOD
 
-			actions = [datapath.ofproto_parser.OFPActionOutput(out_port)]
+		actions = [datapath.ofproto_parser.OFPActionOutput(out_port)]
 	
 		# install a flow to avoid packet_in next time
-			if out_port != ofproto.OFPP_FLOOD and not(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"):
-				self.add_flow(datapath, msg.in_port, dst, actions)
+		if out_port != ofproto.OFPP_FLOOD and not(dst == "00:00:00:00:00:01" or src == "00:00:00:00:00:01"):
+			self.add_flow(datapath, msg.in_port, dst, actions)
 				
 			
 			
-			out = datapath.ofproto_parser.OFPPacketOut(
-				datapath=datapath, buffer_id=msg.buffer_id, in_port=msg.in_port,
-				actions=actions)
-			datapath.send_msg(out)
-		else:
-			self.logger.info("IP packet between hosts 2 and 3 was blocked") #Seperate case for when we dont want to send the packets
+		out = datapath.ofproto_parser.OFPPacketOut(
+			datapath=datapath, buffer_id=msg.buffer_id, in_port=msg.in_port,
+			actions=actions)
+		datapath.send_msg(out)
+
 			
 			
 	@set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
@@ -134,12 +131,25 @@ class SimpleSwitch(app_manager.RyuApp):
 		else:
 			self.logger.info("Illegal port state %s %s", port_no, reason)#Modified Spelling Mistakes
 
-			
+	#Set of rules to block IP traffic between h2 and h3		
+	def block_traffic_by_default(self, dp):
+		ofproto = dp.ofproto
+		parser = dp.ofproto_parser
+		match = parser.OFPMatch(dl_type=ether.ETH_TYPE_IP, dl_src=haddr_to_bin("00:00:00:00:00:02"), dl_dst=haddr_to_bin("00:00:00:00:00:03"))
+		mod = parser.OFPFlowMod(datapath = dp, match = match, cookie=0, command=ofproto.OFPFC_ADD, hard_timeout = 0,  priority=ofproto.OFP_DEFAULT_PRIORITY, actions = [])
+		dp.send_msg(mod)
+		secondmatch = parser.OFPMatch(dl_type=ether.ETH_TYPE_IP, dl_dst=haddr_to_bin("00:00:00:00:00:03"), dl_src=haddr_to_bin("00:00:00:00:00:02"))
+		mod = parser.OFPFlowMod(datapath = dp, match = secondmatch, cookie=0, command=ofproto.OFPFC_ADD, hard_timeout = 0, priority=ofproto.OFP_DEFAULT_PRIORITY, actions = [])
+		dp.send_msg(mod)
 		
-			
-			
-			
-			
+	#event handler to start traffic block on startup	
+	@set_ev_cls(ofp_event.EventOFPStateChange, MAIN_DISPATCHER)
+	def on_startup_event(self, ev):
+		datapath = ev.datapath
+		self.logger.info("Started with event MAIN_DISPATCHER")
+		self.block_traffic_by_default(datapath)
+	
+	
 		
 		
 	
